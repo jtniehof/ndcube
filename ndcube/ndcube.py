@@ -1,4 +1,5 @@
 import abc
+import functools
 import textwrap
 import warnings
 from copy import deepcopy
@@ -6,6 +7,7 @@ from collections import namedtuple
 from collections.abc import Mapping
 
 import astropy.nddata
+import astropy.time
 import astropy.units as u
 import numpy as np
 from astropy.units import UnitsError
@@ -20,7 +22,7 @@ from astropy.wcs.utils import _split_matrix
 from astropy.wcs.wcsapi import BaseHighLevelWCS, HighLevelWCSWrapper
 
 from ndcube import utils
-from ndcube.extra_coords import ExtraCoords
+from ndcube.extra_coords import ExtraCoords, QuantityTableCoordinate, TimeTableCoordinate
 from ndcube.global_coords import GlobalCoords
 from ndcube.mixins import NDCubeSlicingMixin
 from ndcube.ndcube_sequence import NDCubeSequence
@@ -708,6 +710,61 @@ class NDCubeBase(NDCubeSlicingMixin, NDCubeABC):
             return resampled_cube, footprint
 
         return resampled_cube
+
+    @classmethod
+    def fromSpaceData(cls, sd):
+        """
+        Create `~ndcube.NDCube` from `spacepy.SpaceData` input.
+
+        Assumes SpaceData input have ISTP-compliant metadata.
+
+        Parameters
+        ----------
+        sd : `spacepy.SpaceData`
+            Input SpacePy data, containing a single main variable and
+            its dependencies / metadata
+
+        Returns
+        -------
+        `ndcube.NDCube`
+            NDCube resulting from parsing ``sd``.
+        """
+        main_vars = sd.main_vars()
+        if len(main_vars) != 1:
+            raise NoMatchError("Could not identify a unique valid array in SpaceData.")
+        k = main_vars[0]
+        a = sd[k].attrs  # Convenience
+        data = np.array(sd[k][...])  # Base numpy array, not dmarray
+        def get_unit(v):
+            """Return units for a dmarray"""
+            units = u.Unit(v.attrs['UNITS'], parse_strict='silent')
+            if isinstance(units, u.UnrecognizedUnit):
+                units = None  # Look at timeseries, it seems to do okay with arbitrary units
+            return units
+        units = get_unit(sd[k])
+        mask = np.isnan(sd[k].replace_invalid())
+        unc = None
+        if 'DELTA_PLUS_VAR' in a or 'DELTA_MINUS_VAR' in a:
+            if a.get('DELTA_PLUS_VAR', None) != a.get('DELTA_MINUS_VAR', None):
+                warnings.warn('Different plus/minus uncertainties, using plus')
+            unc = a.get('DELTA_PLUS_VAR', a.get('DELTA_MINUS_VAR', None))
+            unc = astropy.nddata.StdDevUncertainty(unc, unit=units)
+        axes = []
+        for axis in range(len(data.shape) - 1, 0, -1):
+            depname = sd[k].attrs['DEPEND_{}'.format(axis)]
+            v = sd[depname]
+            axes.append(QuantityTableCoordinate(
+                u.Quantity(np.array(v[...]), unit=get_unit(v)),
+                names=v.attrs.get('LABLAXIS', depname),
+                physical_types='custom_{}'.format(axis)))
+        depname = sd[k].attrs['DEPEND_0']
+        v = sd[depname]
+        axes.append(TimeTableCoordinate(
+            astropy.time.Time(np.array(v[...])),
+            names=v.attrs.get('LABLAXIS', depname),
+            physical_types='time.epoch'))
+        wcs = functools.reduce(lambda w, a: w & a, axes).wcs
+        return cls(data, wcs=wcs, uncertainty=unc, mask=mask, unit=units)
 
 
 class NDCube(NDCubeBase):

@@ -835,3 +835,100 @@ def test_plot_docstring():
 
     assert cube.plot.__doc__ == cube.plotter.plot.__doc__
     assert signature(cube.plot) == signature(cube.plotter.plot)
+
+
+def test_ndcube_from_spacedata():
+    import datetime
+    import spacepy
+    n_times = 50
+    pa = np.linspace(0, 180, 10)
+    e = np.logspace(0, 2, 12)
+    flux = 1e3 * np.linspace(1, 2, n_times)[:, None, None]\
+           * np.sin(np.radians(pa))[None, :, None]\
+           * e[None, None, :] ** -1.5
+    flux[0, 4, 8] = -1e31  # Force fill
+    sd = spacepy.SpaceData({
+        'Epoch': spacepy.dmarray(
+            [datetime.datetime(2019, 8, 5, 0, i, 30) for i in range(n_times)],
+            attrs={'CATDESC': 'Default time',
+                   'FIELDNAM': 'Epoch',
+                   'FILLVAL': datetime.datetime(9999, 12, 31, 23, 59, 59, 999000),
+                   'LABLAXIS': 'Epoch',
+                   'SCALETYP': 'linear',
+                   'UNITS': 'ms',
+                   'VALIDMAX': datetime.datetime(2029, 12, 31, 23, 59, 59, 999000),
+                   'VALIDMIN': datetime.datetime(1990, 1, 1, 0, 0),
+                   'VAR_TYPE': 'support_data'}),
+        'PA': spacepy.dmarray(
+            pa,
+            attrs={'CATDESC': 'Pitch angle',
+                   'FIELDNAM': 'PA',
+                   'FILLVAL': -1.e31,
+                   'FORMAT': 'E12.2',
+                   'LABLAXIS': 'PA',
+                   'SCALETYP': 'linear',
+                   'UNITS': 'deg',
+                   'VALIDMAX': 360.0,
+                   'VALIDMIN': 0.0,
+                   'VAR_TYPE': 'support_data'}),
+        'Energy': spacepy.dmarray(
+            e,
+            attrs={'CATDESC': 'Energy values',
+                   'FIELDNAM': 'Energy',
+                   'FILLVAL': -1.e31,
+                   'FORMAT': 'E5.1',
+                   'LABLAXIS': 'Energy',
+                   'SCALETYP': 'log',
+                   'UNITS': 'keV',
+                   'VALIDMAX': 300.0,
+                   'VALIDMIN': 0.0,
+                   'VAR_TYPE': 'support_data'}),
+        'Flux': spacepy.dmarray(
+            flux,
+            attrs={'CATDESC': 'Combined Unidirectional Differental Flux',
+                   'DEPEND_0': 'Epoch',
+                   'DEPEND_1': 'PA',
+                   'DEPEND_2': 'Energy',
+                   'DISPLAY_TYPE': 'spectrogram',
+                   'FIELDNAM': 'FEDU',
+                   'FILLVAL': -1.e31,
+                   'FORMAT': 'E10.3',
+                   'LABLAXIS': 'FEDU',
+                   'SCALETYP': 'log',
+                   'UNITS': 'cm^-2 s^-1 sr^-1 keV^-1',
+                   'VALIDMAX': 1.e9,
+                   'VALIDMIN': 0.0,
+                   'VAR_TYPE': 'data'}),
+    })
+    nd = NDCube.fromSpaceData(sd)
+    assert str(nd.unit) == '1 / (cm2 keV s sr)'
+    assert np.isclose(nd.data, sd['Flux']).all()
+    assert nd.mask.shape == sd['Flux'].shape
+    assert nd.mask[0, 4, 8]  # Known fill location
+    assert not nd.mask[0, 4, 9]  # Known not fill location
+    assert nd.wcs.world_axis_names == ('Energy', 'PA', 'Epoch')
+    assert nd.wcs.world_axis_units == ('keV', 'deg', 's')
+    # Checks on time axis
+    axis = nd.axis_world_coords(0)[0]
+    assert axis.iso[0] == sd['Epoch'][0].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    # Checks on PA axis
+    axis = nd.axis_world_coords(1)[0]
+    assert axis[5].value == sd['PA'][5]
+    assert str(axis.unit) == 'deg'
+    # Checks on Energy axis
+    axis = nd.axis_world_coords(2)[0]
+    assert axis[7].value == sd['Energy'][7]
+    assert str(axis.unit) == 'keV'
+
+    # Cut down to a simple function of time and energy
+    del sd['PA']
+    sd['Flux'] = sd['Flux'][:, 4, :]
+    sd['Flux'].attrs['DEPEND_1'] = sd['Flux'].attrs['DEPEND_2']
+    del sd['Flux'].attrs['DEPEND_2']
+    nd = NDCube.fromSpaceData(sd)
+    assert np.isclose(nd.data, sd['Flux']).all()
+    assert nd.mask.shape == sd['Flux'].shape
+    assert nd.mask[0, 8]  # Known fill location
+    assert not nd.mask[0, 9]  # Known not fill location
+    assert nd.axis_world_coords(0)[0][0].iso == sd['Epoch'][0].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    assert nd.axis_world_coords(1)[0][7].value == sd['Energy'][7]
